@@ -205,7 +205,7 @@ def test_render_read_call_parquet() -> None:
     )
     out = _render_read_call(Path("/tmp/a.parquet"), spec)
     assert out.startswith("read_parquet('")
-    assert "/tmp/a.parquet" in out
+    assert str(Path("/tmp/a.parquet")) in out
 
 
 def test_render_read_call_csv_keeps_options() -> None:

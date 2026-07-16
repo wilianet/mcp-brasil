@@ -2,7 +2,7 @@
 
 Rules (ADR-001):
     - tools.py NEVER makes HTTP directly — delegates to client.py
-    - Returns formatted strings for LLM consumption
+    - Returns Markdown plus structured JSON for humans and automation
 
 IMPORTANT: The PNCP API has NO text search parameter.
 All text filtering is done client-side after fetching results.
@@ -11,12 +11,43 @@ Date format for all endpoints: YYYYMMDD (also accepts YYYY-MM-DD and DD/MM/YYYY)
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastmcp import Context
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent
+from pydantic import BaseModel
 
 from mcp_brasil._shared.formatting import format_brl
+from mcp_brasil._shared.validators import normalize_cnpj
 
 from . import client
 from .constants import MODALIDADES
+
+
+class MarkdownToolResult(ToolResult):
+    """ToolResult that keeps direct-call string assertions backward compatible."""
+
+    def markdown(self) -> str:
+        return "\n".join(block.text for block in self.content if hasattr(block, "text"))
+
+    def __contains__(self, value: object) -> bool:
+        return isinstance(value, str) and value in self.markdown()
+
+    def __str__(self) -> str:
+        return self.markdown()
+
+
+def _result(markdown: str, data: BaseModel | dict[str, Any]) -> ToolResult:
+    """Return a human-readable rendering and its machine-readable equivalent."""
+    structured = data.model_dump(mode="json") if isinstance(data, BaseModel) else data
+    return MarkdownToolResult(
+        content=[TextContent(type="text", text=markdown)], structured_content=structured
+    )
+
+
+def _error(message: str) -> ToolResult:
+    return _result(message, {"status": "error", "error": message})
 
 
 async def buscar_contratacoes(
@@ -29,7 +60,8 @@ async def buscar_contratacoes(
     cnpj_orgao: str | None = None,
     modo_disputa: int | None = None,
     pagina: int = 1,
-) -> str:
+    max_paginas: int = 100,
+) -> ToolResult:
     """Busca licitações e contratações públicas no PNCP por período e modalidade.
 
     Pesquisa no Portal Nacional de Contratações Públicas (Lei 14.133/2021).
@@ -54,6 +86,7 @@ async def buscar_contratacoes(
         modo_disputa: Código do modo de disputa (opcional).
             1=Aberto, 2=Fechado, 3=Aberto-Fechado, 4=Dispensa com Disputa.
         pagina: Página de resultados (padrão 1).
+        max_paginas: Limite de páginas percorridas quando texto é informado.
 
     Returns:
         Lista de contratações encontradas com objeto, valor e situação.
@@ -71,18 +104,20 @@ async def buscar_contratacoes(
             cnpj_orgao=cnpj_orgao,
             modo_disputa=modo_disputa,
             pagina=pagina,
+            max_paginas=max_paginas,
         )
     except ValueError as e:
-        return f"Erro de validação: {e}"
+        return _error(f"Erro de validação: {e}")
 
     await ctx.info(f"{resultado.total} contratações encontradas")
 
     if not resultado.contratacoes:
         filtro = f" contendo '{texto}'" if texto else ""
-        return (
+        markdown = (
             f"Nenhuma contratação encontrada para {mod_nome} "
             f"entre {data_inicial} e {data_final}{filtro}."
         )
+        return _result(markdown, resultado)
 
     lines = [f"**Total:** {resultado.total} contratações\n"]
     for i, c in enumerate(resultado.contratacoes, 1):
@@ -105,10 +140,15 @@ async def buscar_contratacoes(
         lines.append("")
 
     if texto:
-        lines.append(f"*Filtrado localmente por '{texto}'.*")
+        lines.append(
+            f"*Filtrado localmente por '{texto}' em "
+            f"{resultado.paginacao.paginas_consultadas} página(s).*"
+        )
+        if not resultado.paginacao.pesquisa_completa:
+            lines.append("*Atenção: a pesquisa textual não cobriu todas as páginas da fonte.*")
     if resultado.total > len(resultado.contratacoes):
         lines.append(f"*Use pagina={pagina + 1} para mais resultados.*")
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)
 
 
 async def buscar_contratos(
@@ -118,7 +158,8 @@ async def buscar_contratos(
     texto: str | None = None,
     cnpj_orgao: str | None = None,
     pagina: int = 1,
-) -> str:
+    max_paginas: int = 100,
+) -> ToolResult:
     """Busca contratos públicos no PNCP por período.
 
     Retorna contratos publicados no Portal Nacional de Contratações Públicas.
@@ -135,6 +176,7 @@ async def buscar_contratos(
             órgão ou fornecedor APÓS buscar os resultados da API.
         cnpj_orgao: CNPJ do órgão contratante (opcional).
         pagina: Página de resultados (padrão 1).
+        max_paginas: Limite de páginas percorridas quando texto é informado.
 
     Returns:
         Lista de contratos encontrados.
@@ -148,15 +190,19 @@ async def buscar_contratos(
             texto=texto,
             cnpj_orgao=cnpj_orgao,
             pagina=pagina,
+            max_paginas=max_paginas,
         )
     except ValueError as e:
-        return f"Erro de validação: {e}"
+        return _error(f"Erro de validação: {e}")
 
     await ctx.info(f"{resultado.total} contratos encontrados")
 
     if not resultado.contratos:
         filtro = f" contendo '{texto}'" if texto else ""
-        return f"Nenhum contrato encontrado entre {data_inicial} e {data_final}{filtro}."
+        return _result(
+            f"Nenhum contrato encontrado entre {data_inicial} e {data_final}{filtro}.",
+            resultado,
+        )
 
     lines = [f"**Total:** {resultado.total} contratos\n"]
     for i, c in enumerate(resultado.contratos, 1):
@@ -176,10 +222,15 @@ async def buscar_contratos(
         )
 
     if texto:
-        lines.append(f"*Filtrado localmente por '{texto}'.*")
+        lines.append(
+            f"*Filtrado localmente por '{texto}' em "
+            f"{resultado.paginacao.paginas_consultadas} página(s).*"
+        )
+        if not resultado.paginacao.pesquisa_completa:
+            lines.append("*Atenção: a pesquisa textual não cobriu todas as páginas da fonte.*")
     if resultado.total > len(resultado.contratos):
         lines.append(f"*Use pagina={pagina + 1} para mais resultados.*")
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)
 
 
 async def buscar_atas(
@@ -189,7 +240,8 @@ async def buscar_atas(
     texto: str | None = None,
     cnpj_orgao: str | None = None,
     pagina: int = 1,
-) -> str:
+    max_paginas: int = 100,
+) -> ToolResult:
     """Busca atas de registro de preço no PNCP por período de vigência.
 
     Atas de registro de preço são documentos que registram preços praticados
@@ -208,6 +260,7 @@ async def buscar_atas(
             órgão ou fornecedor APÓS buscar os resultados da API.
         cnpj_orgao: CNPJ do órgão contratante (opcional).
         pagina: Página de resultados (padrão 1).
+        max_paginas: Limite de páginas percorridas quando texto é informado.
 
     Returns:
         Lista de atas de registro de preço encontradas.
@@ -221,18 +274,20 @@ async def buscar_atas(
             texto=texto,
             cnpj_orgao=cnpj_orgao,
             pagina=pagina,
+            max_paginas=max_paginas,
         )
     except ValueError as e:
-        return f"Erro de validação: {e}"
+        return _error(f"Erro de validação: {e}")
 
     await ctx.info(f"{resultado.total} atas encontradas")
 
     if not resultado.atas:
         filtro = f" contendo '{texto}'" if texto else ""
-        return (
+        markdown = (
             f"Nenhuma ata de registro de preço encontrada "
             f"entre {data_inicial} e {data_final}{filtro}."
         )
+        return _result(markdown, resultado)
 
     lines = [f"**Total:** {resultado.total} atas\n"]
     for i, a in enumerate(resultado.atas, 1):
@@ -251,13 +306,18 @@ async def buscar_atas(
         )
 
     if texto:
-        lines.append(f"*Filtrado localmente por '{texto}'.*")
+        lines.append(
+            f"*Filtrado localmente por '{texto}' em "
+            f"{resultado.paginacao.paginas_consultadas} página(s).*"
+        )
+        if not resultado.paginacao.pesquisa_completa:
+            lines.append("*Atenção: a pesquisa textual não cobriu todas as páginas da fonte.*")
     if resultado.total > len(resultado.atas):
         lines.append(f"*Use pagina={pagina + 1} para mais resultados.*")
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)
 
 
-async def consultar_fornecedor(cnpj: str, ctx: Context) -> str:
+async def consultar_fornecedor(cnpj: str, ctx: Context) -> ToolResult:
     """Consulta informações de um fornecedor de contratações públicas pelo CNPJ.
 
     Retorna dados cadastrais do fornecedor no PNCP (Portal Nacional de
@@ -274,7 +334,7 @@ async def consultar_fornecedor(cnpj: str, ctx: Context) -> str:
     await ctx.info(f"{resultado.total} fornecedor(es) encontrado(s)")
 
     if not resultado.fornecedores:
-        return f"Nenhum fornecedor encontrado com CNPJ {cnpj}."
+        return _result(f"Nenhum fornecedor encontrado com CNPJ {cnpj}.", resultado)
 
     lines: list[str] = []
     for f in resultado.fornecedores:
@@ -289,13 +349,13 @@ async def consultar_fornecedor(cnpj: str, ctx: Context) -> str:
                 "",
             ]
         )
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)
 
 
 async def consultar_orgao(
     cnpj: str,
     ctx: Context,
-) -> str:
+) -> ToolResult:
     """Consulta um órgão contratante no PNCP pelo CNPJ.
 
     Retorna dados cadastrais do órgão público que realiza contratações.
@@ -307,20 +367,24 @@ async def consultar_orgao(
     o campo orgao_cnpj nos resultados.
 
     Args:
-        cnpj: CNPJ do órgão contratante (14 dígitos, com ou sem formatação).
+        cnpj: CNPJ do órgão contratante (12 caracteres alfanuméricos de base
+            e 2 dígitos verificadores, com ou sem formatação).
 
     Returns:
         Dados cadastrais do órgão encontrado.
     """
-    cnpj_limpo = cnpj.replace(".", "").replace("/", "").replace("-", "").strip()
-    if not cnpj_limpo.isdigit() or len(cnpj_limpo) != 14:
-        return f"CNPJ inválido: '{cnpj}'. Informe 14 dígitos numéricos."
+    cnpj_limpo = normalize_cnpj(cnpj)
+    if len(cnpj_limpo) != 14 or not cnpj_limpo[:12].isalnum() or not cnpj_limpo[12:].isdigit():
+        return _error(
+            f"CNPJ inválido: '{cnpj}'. Informe 12 caracteres alfanuméricos "
+            "e 2 dígitos verificadores."
+        )
 
     await ctx.info(f"Consultando órgão CNPJ {cnpj_limpo}...")
     resultado = await client.consultar_orgao(cnpj=cnpj_limpo)
 
     if not resultado.orgaos:
-        return f"Nenhum órgão encontrado com CNPJ {cnpj}."
+        return _result(f"Nenhum órgão encontrado com CNPJ {cnpj}.", resultado)
 
     o = resultado.orgaos[0]
     lines = [
@@ -329,7 +393,7 @@ async def consultar_orgao(
         f"**Esfera:** {o.esfera or 'N/A'} | **Poder:** {o.poder or 'N/A'}",
         f"**Local:** {o.municipio or 'N/A'}/{o.uf or 'N/A'}",
     ]
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)
 
 
 async def buscar_contratacoes_abertas(
@@ -340,7 +404,8 @@ async def buscar_contratacoes_abertas(
     uf: str | None = None,
     cnpj_orgao: str | None = None,
     pagina: int = 1,
-) -> str:
+    max_paginas: int = 100,
+) -> ToolResult:
     """Busca licitações com prazo de proposta aberto no PNCP.
 
     Retorna contratações cujo período de submissão de propostas ainda não
@@ -355,6 +420,7 @@ async def buscar_contratacoes_abertas(
         uf: UF do órgão contratante (ex: SP, RJ). Opcional.
         cnpj_orgao: CNPJ do órgão contratante (opcional).
         pagina: Página de resultados (padrão 1).
+        max_paginas: Limite de páginas percorridas quando texto é informado.
 
     Returns:
         Lista de contratações com propostas abertas.
@@ -369,15 +435,19 @@ async def buscar_contratacoes_abertas(
             uf=uf,
             cnpj_orgao=cnpj_orgao,
             pagina=pagina,
+            max_paginas=max_paginas,
         )
     except ValueError as e:
-        return f"Erro de validação: {e}"
+        return _error(f"Erro de validação: {e}")
 
     await ctx.info(f"{resultado.total} contratações com propostas abertas")
 
     if not resultado.contratacoes:
         filtro = f" contendo '{texto}'" if texto else ""
-        return f"Nenhuma contratação com proposta aberta encontrada até {data_final}{filtro}."
+        return _result(
+            f"Nenhuma contratação com proposta aberta encontrada até {data_final}{filtro}.",
+            resultado,
+        )
 
     lines = [f"**Total:** {resultado.total} contratações com propostas abertas\n"]
     for i, c in enumerate(resultado.contratacoes, 1):
@@ -399,10 +469,15 @@ async def buscar_contratacoes_abertas(
         lines.append("")
 
     if texto:
-        lines.append(f"*Filtrado localmente por '{texto}'.*")
+        lines.append(
+            f"*Filtrado localmente por '{texto}' em "
+            f"{resultado.paginacao.paginas_consultadas} página(s).*"
+        )
+        if not resultado.paginacao.pesquisa_completa:
+            lines.append("*Atenção: a pesquisa textual não cobriu todas as páginas da fonte.*")
     if resultado.total > len(resultado.contratacoes):
         lines.append(f"*Use pagina={pagina + 1} para mais resultados.*")
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)
 
 
 async def buscar_contratacoes_atualizadas(
@@ -415,7 +490,8 @@ async def buscar_contratacoes_atualizadas(
     cnpj_orgao: str | None = None,
     modo_disputa: int | None = None,
     pagina: int = 1,
-) -> str:
+    max_paginas: int = 100,
+) -> ToolResult:
     """Busca contratações atualizadas no PNCP por período de atualização.
 
     Diferente de buscar_contratacoes (que filtra por data de publicação),
@@ -432,6 +508,7 @@ async def buscar_contratacoes_atualizadas(
         cnpj_orgao: CNPJ do órgão contratante (opcional).
         modo_disputa: Código do modo de disputa (opcional).
         pagina: Página de resultados (padrão 1).
+        max_paginas: Limite de páginas percorridas quando texto é informado.
 
     Returns:
         Lista de contratações atualizadas no período.
@@ -449,18 +526,20 @@ async def buscar_contratacoes_atualizadas(
             cnpj_orgao=cnpj_orgao,
             modo_disputa=modo_disputa,
             pagina=pagina,
+            max_paginas=max_paginas,
         )
     except ValueError as e:
-        return f"Erro de validação: {e}"
+        return _error(f"Erro de validação: {e}")
 
     await ctx.info(f"{resultado.total} contratações atualizadas")
 
     if not resultado.contratacoes:
         filtro = f" contendo '{texto}'" if texto else ""
-        return (
+        markdown = (
             f"Nenhuma contratação atualizada para {mod_nome} "
             f"entre {data_inicial} e {data_final}{filtro}."
         )
+        return _result(markdown, resultado)
 
     lines = [f"**Total:** {resultado.total} contratações atualizadas\n"]
     for i, c in enumerate(resultado.contratacoes, 1):
@@ -483,10 +562,15 @@ async def buscar_contratacoes_atualizadas(
         lines.append("")
 
     if texto:
-        lines.append(f"*Filtrado localmente por '{texto}'.*")
+        lines.append(
+            f"*Filtrado localmente por '{texto}' em "
+            f"{resultado.paginacao.paginas_consultadas} página(s).*"
+        )
+        if not resultado.paginacao.pesquisa_completa:
+            lines.append("*Atenção: a pesquisa textual não cobriu todas as páginas da fonte.*")
     if resultado.total > len(resultado.contratacoes):
         lines.append(f"*Use pagina={pagina + 1} para mais resultados.*")
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)
 
 
 async def buscar_contratos_atualizados(
@@ -496,7 +580,8 @@ async def buscar_contratos_atualizados(
     texto: str | None = None,
     cnpj_orgao: str | None = None,
     pagina: int = 1,
-) -> str:
+    max_paginas: int = 100,
+) -> ToolResult:
     """Busca contratos atualizados no PNCP por período de atualização.
 
     Diferente de buscar_contratos (que filtra por data de publicação),
@@ -509,6 +594,7 @@ async def buscar_contratos_atualizados(
         texto: Filtro textual local (opcional).
         cnpj_orgao: CNPJ do órgão contratante (opcional).
         pagina: Página de resultados (padrão 1).
+        max_paginas: Limite de páginas percorridas quando texto é informado.
 
     Returns:
         Lista de contratos atualizados no período.
@@ -522,16 +608,18 @@ async def buscar_contratos_atualizados(
             texto=texto,
             cnpj_orgao=cnpj_orgao,
             pagina=pagina,
+            max_paginas=max_paginas,
         )
     except ValueError as e:
-        return f"Erro de validação: {e}"
+        return _error(f"Erro de validação: {e}")
 
     await ctx.info(f"{resultado.total} contratos atualizados")
 
     if not resultado.contratos:
         filtro = f" contendo '{texto}'" if texto else ""
-        return (
-            f"Nenhum contrato atualizado encontrado entre {data_inicial} e {data_final}{filtro}."
+        return _result(
+            f"Nenhum contrato atualizado encontrado entre {data_inicial} e {data_final}{filtro}.",
+            resultado,
         )
 
     lines = [f"**Total:** {resultado.total} contratos atualizados\n"]
@@ -552,10 +640,15 @@ async def buscar_contratos_atualizados(
         )
 
     if texto:
-        lines.append(f"*Filtrado localmente por '{texto}'.*")
+        lines.append(
+            f"*Filtrado localmente por '{texto}' em "
+            f"{resultado.paginacao.paginas_consultadas} página(s).*"
+        )
+        if not resultado.paginacao.pesquisa_completa:
+            lines.append("*Atenção: a pesquisa textual não cobriu todas as páginas da fonte.*")
     if resultado.total > len(resultado.contratos):
         lines.append(f"*Use pagina={pagina + 1} para mais resultados.*")
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)
 
 
 async def buscar_atas_atualizadas(
@@ -564,7 +657,7 @@ async def buscar_atas_atualizadas(
     ctx: Context,
     cnpj_orgao: str | None = None,
     pagina: int = 1,
-) -> str:
+) -> ToolResult:
     """Busca atas de registro de preço atualizadas no PNCP por período.
 
     Diferente de buscar_atas (que filtra por vigência), esta tool filtra
@@ -590,12 +683,14 @@ async def buscar_atas_atualizadas(
             pagina=pagina,
         )
     except ValueError as e:
-        return f"Erro de validação: {e}"
+        return _error(f"Erro de validação: {e}")
 
     await ctx.info(f"{resultado.total} atas atualizadas")
 
     if not resultado.atas:
-        return f"Nenhuma ata atualizada encontrada entre {data_inicial} e {data_final}."
+        return _result(
+            f"Nenhuma ata atualizada encontrada entre {data_inicial} e {data_final}.", resultado
+        )
 
     lines = [f"**Total:** {resultado.total} atas atualizadas\n"]
     for i, a in enumerate(resultado.atas, 1):
@@ -611,7 +706,7 @@ async def buscar_atas_atualizadas(
 
     if resultado.total > len(resultado.atas):
         lines.append(f"*Use pagina={pagina + 1} para mais resultados.*")
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)
 
 
 async def consultar_contratacao_detalhe(
@@ -619,7 +714,7 @@ async def consultar_contratacao_detalhe(
     ano: int,
     sequencial: int,
     ctx: Context,
-) -> str:
+) -> ToolResult:
     """Consulta detalhes de uma contratação específica no PNCP.
 
     Busca uma contratação individual usando o CNPJ do órgão, ano e número
@@ -653,7 +748,104 @@ async def consultar_contratacao_detalhe(
     ]
     if c.link_pncp:
         lines.append(f"[Ver no PNCP]({c.link_pncp})")
-    return "\n".join(lines)
+    return _result("\n".join(lines), c)
+
+
+async def listar_itens_contratacao(
+    cnpj: str,
+    ano: int,
+    sequencial: int,
+    ctx: Context,
+) -> ToolResult:
+    """Lista os itens de uma contratação específica no PNCP.
+
+    Args:
+        cnpj: CNPJ do órgão contratante, com ou sem formatação.
+        ano: Ano da compra.
+        sequencial: Número sequencial da compra no ano.
+    """
+    await ctx.info(f"Consultando itens da contratação {cnpj}/{ano}/{sequencial}...")
+    resultado = await client.listar_itens_contratacao(cnpj, ano, sequencial)
+    if not resultado.itens:
+        return _result("Nenhum item encontrado para esta contratação.", resultado)
+
+    lines = [f"**Total:** {resultado.total} itens\n"]
+    for item in resultado.itens:
+        valor = format_brl(item.valor_total) if item.valor_total is not None else "N/A"
+        lines.extend(
+            [
+                f"### Item {item.numero_item or 'N/A'} — {item.descricao or 'Sem descrição'}",
+                f"**Tipo:** {item.material_ou_servico_nome or item.material_ou_servico or 'N/A'}",
+                f"**Quantidade:** {item.quantidade or 'N/A'} {item.unidade_medida or ''}".rstrip(),
+                f"**Valor estimado total:** {valor}",
+                f"**Situação:** {item.situacao_nome or 'N/A'}",
+                f"**Tem resultado:** {'Sim' if item.tem_resultado else 'Não'}",
+                "",
+            ]
+        )
+    return _result("\n".join(lines), resultado)
+
+
+async def listar_documentos_contratacao(
+    cnpj: str,
+    ano: int,
+    sequencial: int,
+    ctx: Context,
+) -> ToolResult:
+    """Lista documentos e anexos de uma contratação específica no PNCP."""
+    await ctx.info(f"Consultando documentos da contratação {cnpj}/{ano}/{sequencial}...")
+    resultado = await client.listar_documentos_contratacao(cnpj, ano, sequencial)
+    if not resultado.documentos:
+        return _result("Nenhum documento encontrado para esta contratação.", resultado)
+
+    lines = [f"**Total:** {resultado.total} documentos\n"]
+    for documento in resultado.documentos:
+        lines.extend(
+            [
+                f"### {documento.titulo or 'Documento sem título'}",
+                f"**Tipo:** {documento.tipo_documento_nome or 'N/A'}",
+                f"**Publicação:** {documento.data_publicacao or 'N/A'}",
+            ]
+        )
+        link = documento.url or documento.uri
+        if link:
+            lines.append(f"[Abrir documento]({link})")
+        lines.append("")
+    return _result("\n".join(lines), resultado)
+
+
+async def listar_resultados_item_contratacao(
+    cnpj: str,
+    ano: int,
+    sequencial: int,
+    numero_item: int,
+    ctx: Context,
+) -> ToolResult:
+    """Lista resultados homologados de um item de contratação no PNCP."""
+    await ctx.info(f"Consultando resultados do item {numero_item} em {cnpj}/{ano}/{sequencial}...")
+    resultado = await client.listar_resultados_item_contratacao(cnpj, ano, sequencial, numero_item)
+    if not resultado.resultados:
+        return _result("Nenhum resultado homologado encontrado para este item.", resultado)
+
+    lines = [f"**Total:** {resultado.total} resultados\n"]
+    for item in resultado.resultados:
+        valor = (
+            format_brl(item.valor_total_homologado)
+            if item.valor_total_homologado is not None
+            else "N/A"
+        )
+        lines.extend(
+            [
+                f"### {item.fornecedor_nome or 'Fornecedor não informado'}",
+                f"**Documento:** {item.fornecedor_documento or 'N/A'}",
+                f"**Quantidade homologada:** {item.quantidade_homologada or 'N/A'}",
+                f"**Valor total homologado:** {valor}",
+                f"**Situação:** {item.situacao_nome or 'N/A'}",
+                f"**Data do resultado:** {item.data_resultado or 'N/A'}",
+                "",
+            ]
+        )
+    return _result("\n".join(lines), resultado)
 
 
 async def buscar_pca(
@@ -661,7 +853,7 @@ async def buscar_pca(
     ctx: Context,
     codigo_classificacao: str = "0",
     pagina: int = 1,
-) -> str:
+) -> ToolResult:
     """Busca Planos de Contratações Anuais (PCA) no PNCP.
 
     O PCA é o documento que os órgãos públicos elaboram anualmente listando
@@ -682,7 +874,7 @@ async def buscar_pca(
     await ctx.info(f"{resultado.total} PCAs encontrados")
 
     if not resultado.pcas:
-        return f"Nenhum PCA encontrado para o ano {ano}."
+        return _result(f"Nenhum PCA encontrado para o ano {ano}.", resultado)
 
     lines = [f"**Total:** {resultado.total} PCAs\n"]
     for i, p in enumerate(resultado.pcas, 1):
@@ -701,7 +893,7 @@ async def buscar_pca(
 
     if resultado.total > len(resultado.pcas):
         lines.append(f"*Use pagina={pagina + 1} para mais resultados.*")
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)
 
 
 async def buscar_pca_atualizacao(
@@ -710,7 +902,7 @@ async def buscar_pca_atualizacao(
     ctx: Context,
     cnpj_orgao: str | None = None,
     pagina: int = 1,
-) -> str:
+) -> ToolResult:
     """Busca PCAs atualizados no PNCP por período de atualização.
 
     Retorna Planos de Contratações Anuais que foram atualizados no período.
@@ -735,12 +927,14 @@ async def buscar_pca_atualizacao(
             pagina=pagina,
         )
     except ValueError as e:
-        return f"Erro de validação: {e}"
+        return _error(f"Erro de validação: {e}")
 
     await ctx.info(f"{resultado.total} PCAs atualizados")
 
     if not resultado.pcas:
-        return f"Nenhum PCA atualizado encontrado entre {data_inicial} e {data_final}."
+        return _result(
+            f"Nenhum PCA atualizado encontrado entre {data_inicial} e {data_final}.", resultado
+        )
 
     lines = [f"**Total:** {resultado.total} PCAs atualizados\n"]
     for i, p in enumerate(resultado.pcas, 1):
@@ -758,7 +952,7 @@ async def buscar_pca_atualizacao(
 
     if resultado.total > len(resultado.pcas):
         lines.append(f"*Use pagina={pagina + 1} para mais resultados.*")
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)
 
 
 async def buscar_pca_usuario(
@@ -768,7 +962,7 @@ async def buscar_pca_usuario(
     cnpj_orgao: str | None = None,
     codigo_classificacao: str | None = None,
     pagina: int = 1,
-) -> str:
+) -> ToolResult:
     """Busca itens de PCA por usuário responsável no PNCP.
 
     Retorna itens do Plano de Contratações Anual associados a um
@@ -795,7 +989,9 @@ async def buscar_pca_usuario(
     await ctx.info(f"{resultado.total} PCAs encontrados")
 
     if not resultado.pcas:
-        return f"Nenhum PCA encontrado para o usuário {id_usuario} no ano {ano}."
+        return _result(
+            f"Nenhum PCA encontrado para o usuário {id_usuario} no ano {ano}.", resultado
+        )
 
     lines = [f"**Total:** {resultado.total} PCAs\n"]
     for i, p in enumerate(resultado.pcas, 1):
@@ -813,7 +1009,7 @@ async def buscar_pca_usuario(
 
     if resultado.total > len(resultado.pcas):
         lines.append(f"*Use pagina={pagina + 1} para mais resultados.*")
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)
 
 
 async def buscar_instrumentos_cobranca(
@@ -823,7 +1019,7 @@ async def buscar_instrumentos_cobranca(
     tipo: int | None = None,
     cnpj_orgao: str | None = None,
     pagina: int = 1,
-) -> str:
+) -> ToolResult:
     """Busca instrumentos de cobrança (notas fiscais) no PNCP.
 
     Retorna notas fiscais e outros instrumentos de cobrança vinculados a
@@ -851,12 +1047,15 @@ async def buscar_instrumentos_cobranca(
             pagina=pagina,
         )
     except ValueError as e:
-        return f"Erro de validação: {e}"
+        return _error(f"Erro de validação: {e}")
 
     await ctx.info(f"{resultado.total} instrumentos encontrados")
 
     if not resultado.instrumentos:
-        return f"Nenhum instrumento de cobrança encontrado entre {data_inicial} e {data_final}."
+        return _result(
+            f"Nenhum instrumento de cobrança encontrado entre {data_inicial} e {data_final}.",
+            resultado,
+        )
 
     lines = [f"**Total:** {resultado.total} instrumentos de cobrança\n"]
     for i, ic in enumerate(resultado.instrumentos, 1):
@@ -876,4 +1075,4 @@ async def buscar_instrumentos_cobranca(
 
     if resultado.total > len(resultado.instrumentos):
         lines.append(f"*Use pagina={pagina + 1} para mais resultados.*")
-    return "\n".join(lines)
+    return _result("\n".join(lines), resultado)

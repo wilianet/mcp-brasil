@@ -7,6 +7,7 @@ import respx
 from mcp_brasil.data.compras.pncp import client
 from mcp_brasil.data.compras.pncp.constants import (
     ATAS_URL,
+    CONTRATACAO_DETALHE_URL,
     CONTRATACOES_URL,
     CONTRATOS_URL,
     FORNECEDORES_URL,
@@ -178,6 +179,65 @@ class TestBuscarContratacoes:
         )
         assert result.total == 1
         assert result.contratacoes[0].objeto == "Aquisição de computadores"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_text_filter_scans_all_pages(self) -> None:
+        route = respx.get(CONTRATACOES_URL).mock(
+            side_effect=[
+                httpx.Response(
+                    200,
+                    json={
+                        "totalRegistros": 2,
+                        "totalPaginas": 2,
+                        "data": [{"orgaoEntidade": {}, "objetoCompra": "Serviço de limpeza"}],
+                    },
+                ),
+                httpx.Response(
+                    200,
+                    json={
+                        "totalRegistros": 2,
+                        "totalPaginas": 2,
+                        "data": [
+                            {"orgaoEntidade": {}, "objetoCompra": "Aquisição de computadores"}
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        result = await client.buscar_contratacoes(
+            DATE_INI, DATE_FIM, 6, texto="computadores", tamanho=1
+        )
+
+        assert route.call_count == 2
+        assert result.total == 1
+        assert result.contratacoes[0].objeto == "Aquisição de computadores"
+        assert result.paginacao.paginas_consultadas == 2
+        assert result.paginacao.pesquisa_completa is True
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_text_filter_reports_page_limit(self) -> None:
+        route = respx.get(CONTRATACOES_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "totalRegistros": 3,
+                    "totalPaginas": 3,
+                    "data": [{"orgaoEntidade": {}, "objetoCompra": "Serviço de limpeza"}],
+                },
+            )
+        )
+
+        result = await client.buscar_contratacoes(
+            DATE_INI, DATE_FIM, 6, texto="computadores", tamanho=1, max_paginas=1
+        )
+
+        assert route.call_count == 1
+        assert result.total == 0
+        assert result.paginacao.pesquisa_completa is False
+        assert result.paginacao.limite_paginas_atingido is True
 
 
 # ---------------------------------------------------------------------------
@@ -549,3 +609,123 @@ class TestConsultarOrgao:
         assert o.poder == "Executivo"
         assert o.uf == "São Paulo"
         assert o.municipio == "Campinas"
+
+
+class TestContratacaoComplementos:
+    cnpj = "00394460000141"
+    ano = 2024
+    sequencial = 1
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_consultar_detalhe_uses_query_api(self) -> None:
+        url = f"{CONTRATACAO_DETALHE_URL}/{self.cnpj}/compras/{self.ano}/{self.sequencial}"
+        respx.get(url).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "orgaoEntidade": {"cnpj": self.cnpj},
+                    "anoCompra": self.ano,
+                    "sequencialCompra": self.sequencial,
+                    "objetoCompra": "Objeto detalhado",
+                },
+            )
+        )
+
+        result = await client.consultar_contratacao_detalhe(self.cnpj, self.ano, self.sequencial)
+
+        assert result.objeto == "Objeto detalhado"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_listar_itens(self) -> None:
+        url = f"{ORGAOS_URL}/{self.cnpj}/compras/{self.ano}/{self.sequencial}/itens"
+        respx.get(url).mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "numeroItem": 1,
+                        "descricao": "Computador portátil",
+                        "quantidade": 10,
+                        "unidadeMedida": "UN",
+                        "valorUnitarioEstimado": 5000,
+                        "valorTotal": 50000,
+                        "temResultado": True,
+                    }
+                ],
+            )
+        )
+
+        result = await client.listar_itens_contratacao(self.cnpj, self.ano, self.sequencial)
+
+        assert result.total == 1
+        assert result.itens[0].descricao == "Computador portátil"
+        assert result.itens[0].valor_total == 50000
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_listar_documentos(self) -> None:
+        url = f"{ORGAOS_URL}/{self.cnpj}/compras/{self.ano}/{self.sequencial}/arquivos"
+        respx.get(url).mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "sequencialDocumento": 1,
+                        "titulo": "Edital",
+                        "tipoDocumentoNome": "Edital",
+                        "url": "https://pncp.gov.br/documento.pdf",
+                        "statusAtivo": True,
+                    }
+                ],
+            )
+        )
+
+        result = await client.listar_documentos_contratacao(self.cnpj, self.ano, self.sequencial)
+
+        assert result.total == 1
+        assert result.documentos[0].titulo == "Edital"
+        assert result.documentos[0].url == "https://pncp.gov.br/documento.pdf"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_listar_resultados_item(self) -> None:
+        url = f"{ORGAOS_URL}/{self.cnpj}/compras/{self.ano}/{self.sequencial}/itens/1/resultados"
+        respx.get(url).mock(
+            return_value=httpx.Response(
+                200,
+                json=[
+                    {
+                        "numeroItem": 1,
+                        "sequencialResultado": 1,
+                        "niFornecedor": "11222333000181",
+                        "nomeRazaoSocialFornecedor": "Fornecedor Teste",
+                        "quantidadeHomologada": 10,
+                        "valorTotalHomologado": 48000,
+                        "situacaoCompraItemResultadoNome": "Homologado",
+                    }
+                ],
+            )
+        )
+
+        result = await client.listar_resultados_item_contratacao(
+            self.cnpj, self.ano, self.sequencial, 1
+        )
+
+        assert result.total == 1
+        assert result.resultados[0].fornecedor_nome == "Fornecedor Teste"
+        assert result.resultados[0].valor_total_homologado == 48000
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_listar_resultados_item_accepts_no_content(self) -> None:
+        url = f"{ORGAOS_URL}/{self.cnpj}/compras/{self.ano}/{self.sequencial}/itens/1/resultados"
+        respx.get(url).mock(return_value=httpx.Response(204))
+
+        result = await client.listar_resultados_item_contratacao(
+            self.cnpj, self.ano, self.sequencial, 1
+        )
+
+        assert result.total == 0
+        assert result.resultados == []

@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 
 _DIGITS_RE = re.compile(r"\D")
+_CNPJ_FORMAT_RE = re.compile(r"[.\-/\s]")
+_CNPJ_RE = re.compile(r"^[A-Z0-9]{12}\d{2}$")
 
 
 def _only_digits(value: str) -> str:
@@ -73,6 +75,16 @@ _CNPJ_WEIGHTS_1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
 _CNPJ_WEIGHTS_2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
 
 
+def normalize_cnpj(cnpj: str) -> str:
+    """Remove CNPJ punctuation and normalize alphanumeric characters."""
+    return _CNPJ_FORMAT_RE.sub("", cnpj.strip().upper())
+
+
+def _cnpj_character_value(character: str) -> int:
+    """Return the official CNPJ alphanumeric value (ASCII code minus 48)."""
+    return ord(character) - 48
+
+
 def validate_cnpj(cnpj: str) -> bool:
     """Validate a CNPJ using the check-digit algorithm.
 
@@ -82,42 +94,45 @@ def validate_cnpj(cnpj: str) -> bool:
     Returns:
         True if valid, False otherwise.
     """
-    digits = _only_digits(cnpj)
-    if len(digits) != 14:
+    normalized = normalize_cnpj(cnpj)
+    if not _CNPJ_RE.fullmatch(normalized):
         return False
-    if digits == digits[0] * 14:
+    if normalized == normalized[0] * 14:
         return False
 
     # First check digit
-    total = sum(int(digits[i]) * _CNPJ_WEIGHTS_1[i] for i in range(12))
+    total = sum(_cnpj_character_value(normalized[i]) * _CNPJ_WEIGHTS_1[i] for i in range(12))
     remainder = total % 11
     d1 = 0 if remainder < 2 else 11 - remainder
-    if int(digits[12]) != d1:
+    if int(normalized[12]) != d1:
         return False
 
     # Second check digit
-    total = sum(int(digits[i]) * _CNPJ_WEIGHTS_2[i] for i in range(13))
+    total = sum(_cnpj_character_value(normalized[i]) * _CNPJ_WEIGHTS_2[i] for i in range(13))
     remainder = total % 11
     d2 = 0 if remainder < 2 else 11 - remainder
-    return int(digits[13]) == d2
+    return int(normalized[13]) == d2
 
 
 def format_cnpj(cnpj: str) -> str:
     """Format a CNPJ string as XX.XXX.XXX/XXXX-XX.
 
     Args:
-        cnpj: CNPJ digits (with or without formatting).
+        cnpj: CNPJ characters (with or without formatting).
 
     Returns:
         Formatted CNPJ string.
 
     Raises:
-        ValueError: If CNPJ does not have exactly 14 digits.
+        ValueError: If CNPJ does not have exactly 14 alphanumeric characters.
     """
-    digits = _only_digits(cnpj)
-    if len(digits) != 14:
-        raise ValueError(f"CNPJ must have 14 digits, got {len(digits)}")
-    return f"{digits[:2]}.{digits[2:5]}.{digits[5:8]}/{digits[8:12]}-{digits[12:]}"
+    normalized = normalize_cnpj(cnpj)
+    if not _CNPJ_RE.fullmatch(normalized):
+        raise ValueError("CNPJ must have 12 alphanumeric base characters and 2 check digits")
+    return (
+        f"{normalized[:2]}.{normalized[2:5]}.{normalized[5:8]}"
+        f"/{normalized[8:12]}-{normalized[12:]}"
+    )
 
 
 # ---------------------------------------------------------------------------

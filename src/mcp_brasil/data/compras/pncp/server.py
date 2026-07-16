@@ -22,6 +22,9 @@ from .tools import (
     consultar_contratacao_detalhe,
     consultar_fornecedor,
     consultar_orgao,
+    listar_documentos_contratacao,
+    listar_itens_contratacao,
+    listar_resultados_item_contratacao,
 )
 
 mcp = FastMCP("pncp")
@@ -39,6 +42,12 @@ mcp.tool(buscar_contratacoes_atualizadas, tags={"busca", "contratacoes", "atuali
 mcp.tool(buscar_contratos_atualizados, tags={"busca", "contratos", "atualizacao"})
 mcp.tool(buscar_atas_atualizadas, tags={"busca", "atas", "atualizacao"})
 mcp.tool(consultar_contratacao_detalhe, tags={"consulta", "contratacoes", "detalhe"})
+mcp.tool(listar_itens_contratacao, tags={"consulta", "contratacoes", "itens"})
+mcp.tool(listar_documentos_contratacao, tags={"consulta", "contratacoes", "documentos"})
+mcp.tool(
+    listar_resultados_item_contratacao,
+    tags={"consulta", "contratacoes", "itens", "resultados"},
+)
 
 # Tools — PCA (Plano de Contratações Anual)
 mcp.tool(buscar_pca, tags={"busca", "pca", "planejamento"})

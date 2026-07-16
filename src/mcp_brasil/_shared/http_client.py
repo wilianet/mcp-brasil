@@ -115,6 +115,8 @@ async def http_get(
                     )
 
                 response.raise_for_status()
+                if response.status_code == 204 or not response.content:
+                    return None
                 return response.json()
 
             except httpx.HTTPStatusError as exc:

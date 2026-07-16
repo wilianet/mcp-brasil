@@ -6,6 +6,7 @@ and recommend the most relevant tools from the mcp-brasil catalog.
 
 from __future__ import annotations
 
+import importlib
 import logging
 
 from ..settings import ANTHROPIC_API_KEY
@@ -93,7 +94,7 @@ async def recomendar_tools_impl(query: str, catalog: str) -> str:
         LLM-generated recommendations with explanations.
     """
     try:
-        import anthropic
+        anthropic = importlib.import_module("anthropic")
     except ImportError:
         return (
             "Erro: O pacote 'anthropic' não está instalado. "

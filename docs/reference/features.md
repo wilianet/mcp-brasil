@@ -518,7 +518,7 @@ Departamento Nacional de Auditoria do SUS — atividades de auditoria, relatorio
 
 ## Compras Publicas
 
-### `compras/pncp` — PNCP (14 tools)
+### `compras/pncp` — PNCP (17 tools)
 
 Portal Nacional de Contratacoes Publicas (Lei 14.133/2021).
 
@@ -534,6 +534,9 @@ Portal Nacional de Contratacoes Publicas (Lei 14.133/2021).
 | `compras_pncp_buscar_contratos_atualizados` | Contratos atualizados por periodo |
 | `compras_pncp_buscar_atas_atualizadas` | Atas atualizadas por periodo |
 | `compras_pncp_consultar_contratacao_detalhe` | Detalhes de uma contratacao especifica |
+| `compras_pncp_listar_itens_contratacao` | Itens de uma contratacao especifica |
+| `compras_pncp_listar_documentos_contratacao` | Documentos e anexos de uma contratacao |
+| `compras_pncp_listar_resultados_item_contratacao` | Resultados homologados de um item |
 | `compras_pncp_buscar_pca` | Plano de contratacoes anual |
 | `compras_pncp_buscar_pca_atualizacao` | PCAs atualizados por periodo |
 | `compras_pncp_buscar_pca_usuario` | Itens de PCA por usuario responsavel |

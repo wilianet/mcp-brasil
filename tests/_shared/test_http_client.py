@@ -59,6 +59,13 @@ class TestHttpGet:
 
     @pytest.mark.asyncio
     @respx.mock
+    async def test_no_content_returns_none(self) -> None:
+        respx.get("https://api.example.com/empty").mock(return_value=httpx.Response(204))
+        result = await http_get("https://api.example.com/empty")
+        assert result is None
+
+    @pytest.mark.asyncio
+    @respx.mock
     async def test_404_raises_immediately(self) -> None:
         """4xx errors (except 429) should not retry."""
         respx.get("https://api.example.com/missing").mock(

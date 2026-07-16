@@ -82,6 +82,15 @@ class TestValidateCNPJ:
     def test_another_valid_cnpj(self) -> None:
         assert validate_cnpj("00.394.460/0001-41") is True
 
+    def test_valid_alphanumeric_cnpj_official_example(self) -> None:
+        assert validate_cnpj("12.ABC.345/01DE-35") is True
+
+    def test_alphanumeric_cnpj_requires_numeric_check_digits(self) -> None:
+        assert validate_cnpj("12.ABC.345/01DE-3X") is False
+
+    def test_alphanumeric_cnpj_wrong_check_digits(self) -> None:
+        assert validate_cnpj("12.ABC.345/01DE-36") is False
+
 
 class TestFormatCNPJ:
     def test_formats_digits(self) -> None:
@@ -90,8 +99,11 @@ class TestFormatCNPJ:
     def test_formats_already_formatted(self) -> None:
         assert format_cnpj("11.222.333/0001-81") == "11.222.333/0001-81"
 
+    def test_formats_alphanumeric_cnpj(self) -> None:
+        assert format_cnpj("12abc34501de35") == "12.ABC.345/01DE-35"
+
     def test_raises_wrong_length(self) -> None:
-        with pytest.raises(ValueError, match="14 digits"):
+        with pytest.raises(ValueError, match="12 alphanumeric"):
             format_cnpj("123")
 
 
