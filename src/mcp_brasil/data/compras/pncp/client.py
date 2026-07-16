@@ -16,13 +16,16 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta
+from math import ceil
 from typing import Any
 
 from mcp_brasil._shared.http_client import http_get
+from mcp_brasil._shared.validators import normalize_cnpj
 
 from .constants import (
     ATAS_ATUALIZACAO_URL,
     ATAS_URL,
+    CONTRATACAO_DETALHE_URL,
     CONTRATACOES_ATUALIZACAO_URL,
     CONTRATACOES_PROPOSTA_URL,
     CONTRATACOES_URL,
@@ -41,15 +44,22 @@ from .schemas import (
     ContratacaoResultado,
     Contrato,
     ContratoResultado,
+    DocumentoContratacao,
+    DocumentosContratacaoResultado,
     Fornecedor,
     FornecedorResultado,
     InstrumentoCobranca,
     InstrumentoCobrancaResultado,
+    ItemContratacao,
     ItemPca,
+    ItensContratacaoResultado,
     OrgaoContratante,
     OrgaoResultado,
+    PaginationInfo,
     Pca,
     PcaResultado,
+    ResultadoItemContratacao,
+    ResultadosItemContratacaoResultado,
 )
 
 _DATE_RE = re.compile(r"^\d{8}$")
@@ -134,6 +144,87 @@ def _filtrar_por_texto(items: list[dict[str, Any]], texto: str | None) -> list[d
     return filtered
 
 
+def _extrair_pagina(data: dict[str, Any]) -> tuple[list[dict[str, Any]], int | None, int | None]:
+    """Extract records and pagination metadata from both PNCP response shapes."""
+    raw_items = data.get("data", data.get("resultado", []))
+    items = raw_items if isinstance(raw_items, list) else []
+    total_registros = data.get("totalRegistros", data.get("count"))
+    total_paginas = data.get("totalPaginas")
+    return items, total_registros, total_paginas
+
+
+async def _buscar_paginas_com_texto(
+    url: str,
+    params: dict[str, str],
+    *,
+    texto: str | None,
+    pagina: int,
+    tamanho: int,
+    max_paginas: int,
+) -> tuple[list[dict[str, Any]], PaginationInfo]:
+    """Fetch enough API pages for a truthful client-side text search.
+
+    The PNCP query API has no full-text parameter. When ``texto`` is present,
+    this helper walks every available page (up to ``max_paginas``) before
+    applying the local filter. Without text it preserves the original one-page
+    behavior and exposes that scope in the returned metadata.
+    """
+    if pagina < 1:
+        raise ValueError("pagina deve ser maior ou igual a 1.")
+    if max_paginas < 1:
+        raise ValueError("max_paginas deve ser maior ou igual a 1.")
+
+    pagina_atual = pagina
+    paginas_consultadas = 0
+    acumulados: list[dict[str, Any]] = []
+    total_registros: int | None = None
+    total_paginas: int | None = None
+
+    while True:
+        page_params = {**params, "pagina": str(pagina_atual)}
+        data: dict[str, Any] = await http_get(url, params=page_params)
+        items, page_total, page_count = _extrair_pagina(data)
+        acumulados.extend(items)
+        paginas_consultadas += 1
+
+        if isinstance(page_total, int):
+            total_registros = page_total
+        if isinstance(page_count, int):
+            total_paginas = page_count
+        elif total_paginas is None and total_registros is not None:
+            total_paginas = max(1, ceil(total_registros / tamanho))
+
+        if not texto:
+            break
+        if total_paginas is None or pagina_atual >= total_paginas:
+            break
+        if paginas_consultadas >= max_paginas:
+            break
+        pagina_atual += 1
+
+    limite_atingido = bool(
+        texto
+        and total_paginas is not None
+        and pagina_atual < total_paginas
+        and paginas_consultadas >= max_paginas
+    )
+    pesquisa_completa = bool(
+        total_paginas is not None
+        and pagina == 1
+        and pagina_atual >= total_paginas
+        and not limite_atingido
+    )
+    paginacao = PaginationInfo(
+        pagina_inicial=pagina,
+        paginas_consultadas=paginas_consultadas,
+        total_paginas=total_paginas,
+        total_registros_fonte=total_registros,
+        pesquisa_completa=pesquisa_completa,
+        limite_paginas_atingido=limite_atingido,
+    )
+    return _filtrar_por_texto(acumulados, texto), paginacao
+
+
 def _parse_contratacao(item: dict[str, Any]) -> Contratacao:
     """Parse a raw API response item into a Contratacao model."""
     orgao = item.get("orgaoEntidade", {}) or {}
@@ -210,6 +301,7 @@ async def buscar_contratacoes(
     modo_disputa: int | None = None,
     pagina: int = 1,
     tamanho: int = 10,
+    max_paginas: int = 100,
 ) -> ContratacaoResultado:
     """Search published procurement processes.
 
@@ -234,18 +326,22 @@ async def buscar_contratacoes(
     if modo_disputa:
         params["codigoModoDisputa"] = str(modo_disputa)
 
-    data: dict[str, Any] = await http_get(CONTRATACOES_URL, params=params)
-    items = data.get("data", data.get("resultado", []))
-    if not isinstance(items, list):
-        items = []
-
-    # Client-side text filtering
-    items = _filtrar_por_texto(items, texto)
+    items, paginacao = await _buscar_paginas_com_texto(
+        CONTRATACOES_URL,
+        params,
+        texto=texto,
+        pagina=pagina,
+        tamanho=min(tamanho, 50),
+        max_paginas=max_paginas,
+    )
 
     contratacoes = [_parse_contratacao(item) for item in items]
     return ContratacaoResultado(
-        total=len(contratacoes) if texto else data.get("totalRegistros", len(contratacoes)),
+        total=len(contratacoes)
+        if texto
+        else (paginacao.total_registros_fonte or len(contratacoes)),
         contratacoes=contratacoes,
+        paginacao=paginacao,
     )
 
 
@@ -257,6 +353,7 @@ async def buscar_contratos(
     cnpj_orgao: str | None = None,
     pagina: int = 1,
     tamanho: int = 10,
+    max_paginas: int = 100,
 ) -> ContratoResultado:
     """Search public contracts.
 
@@ -276,18 +373,20 @@ async def buscar_contratos(
     if cnpj_orgao:
         params["cnpjOrgao"] = cnpj_orgao
 
-    data: dict[str, Any] = await http_get(CONTRATOS_URL, params=params)
-    items = data.get("data", data.get("resultado", []))
-    if not isinstance(items, list):
-        items = []
-
-    # Client-side text filtering
-    items = _filtrar_por_texto(items, texto)
+    items, paginacao = await _buscar_paginas_com_texto(
+        CONTRATOS_URL,
+        params,
+        texto=texto,
+        pagina=pagina,
+        tamanho=min(tamanho, 500),
+        max_paginas=max_paginas,
+    )
 
     contratos = [_parse_contrato(item) for item in items]
     return ContratoResultado(
-        total=len(contratos) if texto else data.get("totalRegistros", len(contratos)),
+        total=len(contratos) if texto else (paginacao.total_registros_fonte or len(contratos)),
         contratos=contratos,
+        paginacao=paginacao,
     )
 
 
@@ -299,6 +398,7 @@ async def buscar_atas(
     cnpj_orgao: str | None = None,
     pagina: int = 1,
     tamanho: int = 10,
+    max_paginas: int = 100,
 ) -> AtaResultado:
     """Search price record minutes (atas de registro de preço).
 
@@ -319,18 +419,20 @@ async def buscar_atas(
     if cnpj_orgao:
         params["cnpj"] = cnpj_orgao
 
-    data: dict[str, Any] = await http_get(ATAS_URL, params=params)
-    items = data.get("data", data.get("resultado", []))
-    if not isinstance(items, list):
-        items = []
-
-    # Client-side text filtering
-    items = _filtrar_por_texto(items, texto)
+    items, paginacao = await _buscar_paginas_com_texto(
+        ATAS_URL,
+        params,
+        texto=texto,
+        pagina=pagina,
+        tamanho=min(tamanho, 500),
+        max_paginas=max_paginas,
+    )
 
     atas = [_parse_ata(item) for item in items]
     return AtaResultado(
-        total=len(atas) if texto else data.get("totalRegistros", len(atas)),
+        total=len(atas) if texto else (paginacao.total_registros_fonte or len(atas)),
         atas=atas,
+        paginacao=paginacao,
     )
 
 
@@ -413,6 +515,7 @@ async def buscar_contratacoes_abertas(
     cnpj_orgao: str | None = None,
     pagina: int = 1,
     tamanho: int = 10,
+    max_paginas: int = 100,
 ) -> ContratacaoResultado:
     """Search procurement processes with open proposal submission.
 
@@ -432,15 +535,22 @@ async def buscar_contratacoes_abertas(
     if cnpj_orgao:
         params["cnpj"] = cnpj_orgao
 
-    data: dict[str, Any] = await http_get(CONTRATACOES_PROPOSTA_URL, params=params)
-    items = data.get("data", data.get("resultado", []))
-    if not isinstance(items, list):
-        items = []
-    items = _filtrar_por_texto(items, texto)
+    tamanho_efetivo = min(max(tamanho, 10), 50)
+    items, paginacao = await _buscar_paginas_com_texto(
+        CONTRATACOES_PROPOSTA_URL,
+        params,
+        texto=texto,
+        pagina=pagina,
+        tamanho=tamanho_efetivo,
+        max_paginas=max_paginas,
+    )
     contratacoes = [_parse_contratacao(item) for item in items]
     return ContratacaoResultado(
-        total=len(contratacoes) if texto else data.get("totalRegistros", len(contratacoes)),
+        total=len(contratacoes)
+        if texto
+        else (paginacao.total_registros_fonte or len(contratacoes)),
         contratacoes=contratacoes,
+        paginacao=paginacao,
     )
 
 
@@ -455,6 +565,7 @@ async def buscar_contratacoes_atualizadas(
     modo_disputa: int | None = None,
     pagina: int = 1,
     tamanho: int = 10,
+    max_paginas: int = 100,
 ) -> ContratacaoResultado:
     """Search procurement processes by global update date.
 
@@ -479,15 +590,22 @@ async def buscar_contratacoes_atualizadas(
     if modo_disputa:
         params["codigoModoDisputa"] = str(modo_disputa)
 
-    data: dict[str, Any] = await http_get(CONTRATACOES_ATUALIZACAO_URL, params=params)
-    items = data.get("data", data.get("resultado", []))
-    if not isinstance(items, list):
-        items = []
-    items = _filtrar_por_texto(items, texto)
+    tamanho_efetivo = min(max(tamanho, 10), 50)
+    items, paginacao = await _buscar_paginas_com_texto(
+        CONTRATACOES_ATUALIZACAO_URL,
+        params,
+        texto=texto,
+        pagina=pagina,
+        tamanho=tamanho_efetivo,
+        max_paginas=max_paginas,
+    )
     contratacoes = [_parse_contratacao(item) for item in items]
     return ContratacaoResultado(
-        total=len(contratacoes) if texto else data.get("totalRegistros", len(contratacoes)),
+        total=len(contratacoes)
+        if texto
+        else (paginacao.total_registros_fonte or len(contratacoes)),
         contratacoes=contratacoes,
+        paginacao=paginacao,
     )
 
 
@@ -499,6 +617,7 @@ async def buscar_contratos_atualizados(
     cnpj_orgao: str | None = None,
     pagina: int = 1,
     tamanho: int = 10,
+    max_paginas: int = 100,
 ) -> ContratoResultado:
     """Search contracts by global update date.
 
@@ -518,15 +637,20 @@ async def buscar_contratos_atualizados(
     if cnpj_orgao:
         params["cnpjOrgao"] = cnpj_orgao
 
-    data: dict[str, Any] = await http_get(CONTRATOS_ATUALIZACAO_URL, params=params)
-    items = data.get("data", data.get("resultado", []))
-    if not isinstance(items, list):
-        items = []
-    items = _filtrar_por_texto(items, texto)
+    tamanho_efetivo = min(max(tamanho, 10), 500)
+    items, paginacao = await _buscar_paginas_com_texto(
+        CONTRATOS_ATUALIZACAO_URL,
+        params,
+        texto=texto,
+        pagina=pagina,
+        tamanho=tamanho_efetivo,
+        max_paginas=max_paginas,
+    )
     contratos = [_parse_contrato(item) for item in items]
     return ContratoResultado(
-        total=len(contratos) if texto else data.get("totalRegistros", len(contratos)),
+        total=len(contratos) if texto else (paginacao.total_registros_fonte or len(contratos)),
         contratos=contratos,
+        paginacao=paginacao,
     )
 
 
@@ -588,9 +712,121 @@ async def consultar_contratacao_detalhe(
 
     API: GET /v1/orgaos/{cnpj}/compras/{ano}/{sequencial}
     """
-    url = f"{ORGAOS_URL}/{cnpj}/compras/{ano}/{sequencial}"
+    url = f"{CONTRATACAO_DETALHE_URL}/{normalize_cnpj(cnpj)}/compras/{ano}/{sequencial}"
     data: dict[str, Any] = await http_get(url)
     return _parse_contratacao(data)
+
+
+def _parse_item_contratacao(item: dict[str, Any]) -> ItemContratacao:
+    """Parse an item returned by the PNCP integration API."""
+    return ItemContratacao(
+        numero_item=item.get("numeroItem"),
+        descricao=item.get("descricao"),
+        material_ou_servico=item.get("materialOuServico"),
+        material_ou_servico_nome=item.get("materialOuServicoNome"),
+        quantidade=item.get("quantidade"),
+        unidade_medida=item.get("unidadeMedida"),
+        valor_unitario_estimado=item.get("valorUnitarioEstimado"),
+        valor_total=item.get("valorTotal"),
+        orcamento_sigiloso=item.get("orcamentoSigiloso"),
+        criterio_julgamento_nome=item.get("criterioJulgamentoNome"),
+        situacao_nome=item.get("situacaoCompraItemNome"),
+        tipo_beneficio_nome=item.get("tipoBeneficioNome"),
+        data_inclusao=item.get("dataInclusao"),
+        data_atualizacao=item.get("dataAtualizacao"),
+        tem_resultado=item.get("temResultado"),
+        codigo_catalogo=item.get("catalogoCodigoItem"),
+        informacao_complementar=item.get("informacaoComplementar"),
+    )
+
+
+def _parse_documento_contratacao(item: dict[str, Any]) -> DocumentoContratacao:
+    """Parse procurement document metadata returned by PNCP."""
+    return DocumentoContratacao(
+        sequencial_documento=item.get("sequencialDocumento"),
+        titulo=item.get("titulo"),
+        tipo_documento_id=item.get("tipoDocumentoId"),
+        tipo_documento_nome=item.get("tipoDocumentoNome"),
+        tipo_documento_descricao=item.get("tipoDocumentoDescricao"),
+        url=item.get("url"),
+        uri=item.get("uri"),
+        status_ativo=item.get("statusAtivo"),
+        data_publicacao=item.get("dataPublicacaoPncp"),
+    )
+
+
+def _parse_resultado_item(item: dict[str, Any]) -> ResultadoItemContratacao:
+    """Parse a homologated item result returned by PNCP."""
+    return ResultadoItemContratacao(
+        numero_item=item.get("numeroItem"),
+        sequencial_resultado=item.get("sequencialResultado"),
+        fornecedor_documento=item.get("niFornecedor"),
+        fornecedor_nome=item.get("nomeRazaoSocialFornecedor"),
+        tipo_pessoa=item.get("tipoPessoa"),
+        quantidade_homologada=item.get("quantidadeHomologada"),
+        valor_unitario_homologado=item.get("valorUnitarioHomologado"),
+        valor_total_homologado=item.get("valorTotalHomologado"),
+        percentual_desconto=item.get("percentualDesconto"),
+        situacao_nome=item.get("situacaoCompraItemResultadoNome"),
+        porte_fornecedor_nome=item.get("porteFornecedorNome"),
+        data_resultado=item.get("dataResultado"),
+        data_inclusao=item.get("dataInclusao"),
+        data_atualizacao=item.get("dataAtualizacao"),
+    )
+
+
+def _integration_items(data: Any) -> list[dict[str, Any]]:
+    """Normalize list and wrapped-list responses from the integration API."""
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict)]
+    if isinstance(data, dict):
+        items = data.get("data", data.get("resultado", []))
+        if isinstance(items, list):
+            return [item for item in items if isinstance(item, dict)]
+    return []
+
+
+async def listar_itens_contratacao(
+    cnpj: str,
+    ano: int,
+    sequencial: int,
+) -> ItensContratacaoResultado:
+    """List all items from a specific PNCP procurement process."""
+    cnpj_normalizado = normalize_cnpj(cnpj)
+    url = f"{ORGAOS_URL}/{cnpj_normalizado}/compras/{ano}/{sequencial}/itens"
+    data: Any = await http_get(url)
+    itens = [_parse_item_contratacao(item) for item in _integration_items(data)]
+    return ItensContratacaoResultado(total=len(itens), itens=itens)
+
+
+async def listar_documentos_contratacao(
+    cnpj: str,
+    ano: int,
+    sequencial: int,
+) -> DocumentosContratacaoResultado:
+    """List documents and attachments from a specific procurement process."""
+    cnpj_normalizado = normalize_cnpj(cnpj)
+    url = f"{ORGAOS_URL}/{cnpj_normalizado}/compras/{ano}/{sequencial}/arquivos"
+    data: Any = await http_get(url)
+    documentos = [_parse_documento_contratacao(item) for item in _integration_items(data)]
+    return DocumentosContratacaoResultado(total=len(documentos), documentos=documentos)
+
+
+async def listar_resultados_item_contratacao(
+    cnpj: str,
+    ano: int,
+    sequencial: int,
+    numero_item: int,
+) -> ResultadosItemContratacaoResultado:
+    """List homologated results for one procurement item."""
+    cnpj_normalizado = normalize_cnpj(cnpj)
+    url = (
+        f"{ORGAOS_URL}/{cnpj_normalizado}/compras/{ano}/{sequencial}"
+        f"/itens/{numero_item}/resultados"
+    )
+    data: Any = await http_get(url)
+    resultados = [_parse_resultado_item(item) for item in _integration_items(data)]
+    return ResultadosItemContratacaoResultado(total=len(resultados), resultados=resultados)
 
 
 def _parse_item_pca(item: dict[str, Any]) -> ItemPca:

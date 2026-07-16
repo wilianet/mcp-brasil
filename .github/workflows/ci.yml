@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [main]
@@ -34,3 +37,22 @@ jobs:
 
       - name: Test
         run: uv run pytest -v
+
+  security:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Export locked production dependencies
+        run: >-
+          uv export --frozen --no-dev --no-hashes --no-emit-project
+          --output-file /tmp/requirements.txt
+
+      - name: Audit production dependencies
+        run: uvx pip-audit -r /tmp/requirements.txt --progress-spinner off

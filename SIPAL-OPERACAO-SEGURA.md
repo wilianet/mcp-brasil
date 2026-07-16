@@ -46,7 +46,9 @@ Nao use `pip install -e .` ou `uv sync --frozen` antes de atualizar e auditar o
 ## 2. Auditar as dependencias instaladas
 
 ```powershell
-uvx pip-audit --path .venv\Lib\site-packages --progress-spinner off
+$auditFile = Join-Path $env:TEMP "mcp-brasil-requirements.txt"
+uv export --frozen --no-dev --no-hashes --no-emit-project --output-file $auditFile
+uvx pip-audit -r $auditFile --progress-spinner off
 ```
 
 O resultado esperado e `No known vulnerabilities found`. Se houver qualquer
@@ -61,17 +63,20 @@ uv pip freeze --python .venv\Scripts\python.exe
 
 ## 3. Configuracao inicial do cliente MCP
 
-Use o Python da venv como comando do servidor:
+Para a S.I.A., inicie exclusivamente o subservidor PNCP. Nao use
+`python -m mcp_brasil.server`: o servidor raiz registra fontes, datasets e
+integracoes que nao fazem parte do caso de uso de monitoramento de licitacoes.
+
+Use o executavel FastMCP da venv e fixe o diretorio do fork:
 
 ```json
 {
   "mcpServers": {
     "dados-publicos": {
-      "command": "C:\\Users\\wilia\\OneDrive - Sipal Industria E Comercio Ltda\\ideias\\dados-publicos\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "mcp_brasil.server"],
+      "command": "C:\\Users\\wilia\\OneDrive - Sipal Industria E Comercio Ltda\\ideias\\dados-publicos\\.venv\\Scripts\\fastmcp.exe",
+      "args": ["run", "mcp_brasil.data.compras.pncp.server:mcp"],
+      "cwd": "C:\\Users\\wilia\\OneDrive - Sipal Industria E Comercio Ltda\\ideias\\dados-publicos",
       "env": {
-        "MCP_BRASIL_TOOL_SEARCH": "bm25",
-        "MCP_BRASIL_AUTH_MODE": "none",
         "MCP_BRASIL_DATASETS": "",
         "MCP_BRASIL_LGPD_ALLOW_PII": ""
       }
@@ -80,8 +85,22 @@ Use o Python da venv como comando do servidor:
 }
 ```
 
-`MCP_BRASIL_AUTH_MODE=none` so e aceitavel nesse modo `stdio`, pois nao existe
-porta de rede. Nao coloque chaves diretamente em arquivos versionados.
+O transporte padrao e `stdio`, sem porta de rede. Nao coloque chaves
+diretamente em arquivos versionados.
+
+Valide manualmente o subservidor antes de conecta-lo a S.I.A.:
+
+```powershell
+uv run fastmcp run mcp_brasil.data.compras.pncp.server:mcp
+```
+
+Os testes contra a API real sao opcionais e nao rodam no CI comum:
+
+```powershell
+$env:MCP_BRASIL_RUN_LIVE_TESTS = "1"
+uv run pytest -m live -v
+Remove-Item Env:MCP_BRASIL_RUN_LIVE_TESTS
+```
 
 ## 4. Segredos e dados
 
@@ -132,6 +151,7 @@ Antes de incorporar uma nova versao:
 
 - Indicadores de Bacen e IBGE.
 - Pesquisa de compras publicas, PNCP e contratos.
+- Consulta de itens, documentos e resultados homologados de uma contratacao.
 - Informacoes cadastrais e territoriais publicas.
 - Apoio a pesquisas de mercado e relatorios internos.
 

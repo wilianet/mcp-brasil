@@ -68,4 +68,4 @@ class TestComposedServer:
     async def test_total_tools_count(self) -> None:
         async with Client(mcp) as c:
             tool_list = await c.list_tools()
-            assert len(tool_list) == 29, f"Expected 29 tools, got {len(tool_list)}"
+        assert len(tool_list) == 32, f"Expected 32 tools, got {len(tool_list)}"

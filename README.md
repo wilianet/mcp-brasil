@@ -232,7 +232,7 @@ Conecte o server e faça perguntas em linguagem natural:
 
 | Feature | Fonte | Tools |
 |---------|-------|:-----:|
-| `compras` | PNCP + ComprasNet/SIASG — licitações, contratos, pregões, CATMAT | 29 |
+| `compras` | PNCP + ComprasNet/SIASG — licitações, contratos, pregões, CATMAT | 32 |
 | `transferegov` | TransfereGov — emendas parlamentares PIX | 5 |
 
 ### Mercado Financeiro e Notícias

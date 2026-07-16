@@ -18,9 +18,14 @@ from mcp_brasil.data.compras.pncp.server import mcp
 CLIENT_MODULE = "mcp_brasil.data.compras.pncp.client"
 
 
+def _markdown(result: object) -> str:
+    content = getattr(result, "content", [])
+    return "\n".join(block.text for block in content if hasattr(block, "text"))
+
+
 class TestToolsRegistered:
     @pytest.mark.asyncio
-    async def test_all_14_tools_registered(self) -> None:
+    async def test_all_17_tools_registered(self) -> None:
         async with Client(mcp) as c:
             tool_list = await c.list_tools()
             names = {t.name for t in tool_list}
@@ -35,6 +40,9 @@ class TestToolsRegistered:
                 "buscar_contratos_atualizados",
                 "buscar_atas_atualizadas",
                 "consultar_contratacao_detalhe",
+                "listar_itens_contratacao",
+                "listar_documentos_contratacao",
+                "listar_resultados_item_contratacao",
                 "buscar_pca",
                 "buscar_pca_atualizacao",
                 "buscar_pca_usuario",
@@ -111,14 +119,15 @@ class TestToolExecution:
                         "modalidade": 6,
                     },
                 )
-                assert "Aquisição de computadores" in result.data
-                assert "Ministério da Educação" in result.data
+                assert "Aquisição de computadores" in _markdown(result)
+                assert result.data["contratacoes"][0]["orgao_nome"] == "Ministério da Educação"
 
     @pytest.mark.asyncio
     async def test_consultar_orgao_invalid_cnpj(self) -> None:
         async with Client(mcp) as c:
             result = await c.call_tool("consultar_orgao", {"cnpj": "123"})
-            assert "CNPJ inválido" in result.data
+            assert "CNPJ inválido" in _markdown(result)
+            assert result.data["status"] == "error"
 
     @pytest.mark.asyncio
     async def test_buscar_pca_e2e(self) -> None:
@@ -130,7 +139,8 @@ class TestToolExecution:
         ):
             async with Client(mcp) as c:
                 result = await c.call_tool("buscar_pca", {"ano": 2025})
-                assert "Nenhum PCA encontrado" in result.data
+                assert "Nenhum PCA encontrado" in _markdown(result)
+                assert result.data == {"total": 0, "pcas": []}
 
     @pytest.mark.asyncio
     async def test_consultar_contratacao_detalhe_e2e(self) -> None:
@@ -150,4 +160,5 @@ class TestToolExecution:
                     "consultar_contratacao_detalhe",
                     {"cnpj": "00394460000141", "ano": 2024, "sequencial": 1},
                 )
-                assert "Contratação teste" in result.data
+                assert "Contratação teste" in _markdown(result)
+                assert result.data["objeto"] == "Contratação teste"
