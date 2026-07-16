@@ -7,6 +7,7 @@ and dependency information between steps.
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 
@@ -236,7 +237,7 @@ async def planejar_consulta_impl(query: str, catalog: str) -> str:
         Markdown-rendered execution plan or error message.
     """
     try:
-        import anthropic
+        anthropic = importlib.import_module("anthropic")
     except ImportError:
         return (
             "Erro: O pacote 'anthropic' não está instalado. "
