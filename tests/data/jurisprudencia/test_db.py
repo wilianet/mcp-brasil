@@ -1,5 +1,10 @@
 """Unit tests for the embedded SQLite jurisprudence database."""
 
+import sqlite3
+
+import pytest
+
+from mcp_brasil.data.jurisprudencia import db
 from mcp_brasil.data.jurisprudencia.db import (
     buscar_repercussao_geral_local,
     buscar_sumulas_local,
@@ -39,3 +44,21 @@ class TestLocalJurisprudenciaDB:
         # Tema 69 (Tese do Século)
         temas = [r.numero_tema for r in results]
         assert 69 in temas
+
+    def test_busca_por_numero_aceita_prefixo(self) -> None:
+        for query in ("Súmula Vinculante 11", "sv 11", "súmula nº 11", " 11 "):
+            results = buscar_sumulas_local(query=query, tribunal="stf")
+            assert results, query
+            assert results[0].numero == 11, query
+
+    def test_texto_com_sv_e_digito_nao_vira_busca_por_numero(self) -> None:
+        # "desvio" contém "sv"; antes, "desvio de finalidade 1" virava busca pela Súmula 1
+        results = buscar_sumulas_local(query="desvio de finalidade 1", tribunal="stf")
+        assert all("desvio" in s.enunciado.lower() for s in results)
+
+    def test_fecha_conexao_apos_busca(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = db.get_connection()
+        monkeypatch.setattr(db, "get_connection", lambda: conn)
+        buscar_sumulas_local(query="algemas", tribunal="stf")
+        with pytest.raises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")

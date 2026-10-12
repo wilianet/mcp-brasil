@@ -190,3 +190,23 @@ class TestParserEdgeCases:
         result = client._parse_repercussao({})
         assert result.numero_tema is None
         assert result.titulo is None
+
+
+class TestFallbackLocal:
+    """API do STF bloqueada por WAF: as buscas devem vir da base SQLite local."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_sumulas_caem_para_local_quando_api_falha(self) -> None:
+        respx.get(STF_API_BASE).mock(return_value=httpx.Response(403))
+        result = await client.buscar_sumulas_stf("algemas")
+        assert any(s.numero == 11 and s.vinculante for s in result)
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_repercussao_geral_cai_para_local_quando_resposta_vazia(self) -> None:
+        # AWS WAF devolve 202 com corpo vazio
+        respx.get(STF_API_BASE).mock(return_value=httpx.Response(202, text=""))
+        result = await client.buscar_repercussao_geral(tema=810)
+        assert len(result) == 1
+        assert result[0].numero_tema == 810

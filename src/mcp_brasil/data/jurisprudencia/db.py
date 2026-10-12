@@ -28,9 +28,13 @@ _DB_PATH = _DATA_DIR / "jurisprudencia.db"
 _COLUNAS_SUMULAS = (
     "s.tribunal, s.numero, s.vinculante, s.enunciado, s.ramo, s.situacao, s.data_aprovacao"
 )
+# Consulta que é só um número, opcionalmente precedido de "súmula", "súmula vinculante" ou "sv"
+_NUMERO_QUERY = re.compile(
+    r"^\s*(?:s[uú]mula(?:\s+vinculante)?|sv)?\s*(?:n[º°o.]?\s*)?(\d+)\s*$", re.IGNORECASE
+)
+
 _COLUNAS_RG = (
-    "numero_tema, titulo, descricao, relator, leading_case, "
-    "situacao, data_reconhecimento, tese"
+    "numero_tema, titulo, descricao, relator, leading_case, situacao, data_reconhecimento, tese"
 )
 
 
@@ -267,70 +271,75 @@ def buscar_sumulas_local(
     limit: int = 20,
 ) -> list[Sumula]:
     """Busca súmulas no banco SQLite local com suporte a FTS5 e filtros."""
-    conn = get_connection()
-    cursor = conn.cursor()
+    with contextlib.closing(get_connection()) as conn:
+        cursor = conn.cursor()
 
-    conditions: list[str] = []
-    params: list[Any] = []
+        conditions: list[str] = []
+        params: list[Any] = []
 
-    if tribunal:
-        conditions.append("s.tribunal = ?")
-        params.append(tribunal.upper())
+        if tribunal:
+            conditions.append("s.tribunal = ?")
+            params.append(tribunal.upper())
 
-    if vinculante is not None:
-        conditions.append("s.vinculante = ?")
-        params.append(1 if vinculante else 0)
+        if vinculante is not None:
+            conditions.append("s.vinculante = ?")
+            params.append(1 if vinculante else 0)
 
-    numero_match = None
-    if query:
-        num_clean = re.sub(r"[^\d]", "", query)
-        is_num_query = (
-            query.strip().isdigit()
-            or "sumula" in query.lower()
-            or "sv" in query.lower()
-        )
-        if num_clean and is_num_query:
-            with contextlib.suppress(ValueError):
-                numero_match = int(num_clean)
+        numero_match = None
+        if query:
+            m = _NUMERO_QUERY.match(query)
+            if m:
+                numero_match = int(m.group(1))
 
-    if numero_match is not None:
-        conditions.append("s.numero = ?")
-        params.append(numero_match)
-        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
-        sql = f"""
-            SELECT {_COLUNAS_SUMULAS}
-            FROM sumulas s
-            {where_clause}
-            ORDER BY s.vinculante DESC, s.numero ASC
-            LIMIT ?
-        """
-        params.append(limit)
-        cursor.execute(sql, params)
-    elif query:
-        fts_query = _clean_fts_query(query)
-        if fts_query:
-            conditions.append("sumulas_fts MATCH ?")
-            params.append(fts_query)
+        if numero_match is not None:
+            conditions.append("s.numero = ?")
+            params.append(numero_match)
             where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
             sql = f"""
                 SELECT {_COLUNAS_SUMULAS}
                 FROM sumulas s
-                JOIN sumulas_fts ON s.id = sumulas_fts.rowid
                 {where_clause}
-                ORDER BY s.vinculante DESC, bm25(sumulas_fts)
+                ORDER BY s.vinculante DESC, s.numero ASC
                 LIMIT ?
             """
             params.append(limit)
-            try:
-                cursor.execute(sql, params)
-            except sqlite3.OperationalError:
-                # Fallback para LIKE simples se a query FTS for inválida
-                params.pop()  # remove limit
-                params.pop()  # remove fts_query
-                conditions.pop()
-                conditions.append("s.enunciado LIKE ?")
-                params.append(f"%{query}%")
-                where_clause = " WHERE " + " AND ".join(conditions)
+            cursor.execute(sql, params)
+        elif query:
+            fts_query = _clean_fts_query(query)
+            if fts_query:
+                conditions.append("sumulas_fts MATCH ?")
+                params.append(fts_query)
+                where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
+                sql = f"""
+                    SELECT {_COLUNAS_SUMULAS}
+                    FROM sumulas s
+                    JOIN sumulas_fts ON s.id = sumulas_fts.rowid
+                    {where_clause}
+                    ORDER BY s.vinculante DESC, bm25(sumulas_fts)
+                    LIMIT ?
+                """
+                params.append(limit)
+                try:
+                    cursor.execute(sql, params)
+                except sqlite3.OperationalError:
+                    # Fallback para LIKE simples se a query FTS for inválida
+                    params.pop()  # remove limit
+                    params.pop()  # remove fts_query
+                    conditions.pop()
+                    conditions.append("s.enunciado LIKE ?")
+                    params.append(f"%{query}%")
+                    where_clause = " WHERE " + " AND ".join(conditions)
+                    sql = f"""
+                        SELECT {_COLUNAS_SUMULAS}
+                        FROM sumulas s
+                        {where_clause}
+                        ORDER BY s.vinculante DESC, s.numero ASC
+                        LIMIT ?
+                    """
+                    params.append(limit)
+                    cursor.execute(sql, params)
+            else:
+                where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
                 sql = f"""
                     SELECT {_COLUNAS_SUMULAS}
                     FROM sumulas s
@@ -351,31 +360,20 @@ def buscar_sumulas_local(
             """
             params.append(limit)
             cursor.execute(sql, params)
-    else:
-        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
-        sql = f"""
-            SELECT {_COLUNAS_SUMULAS}
-            FROM sumulas s
-            {where_clause}
-            ORDER BY s.vinculante DESC, s.numero ASC
-            LIMIT ?
-        """
-        params.append(limit)
-        cursor.execute(sql, params)
 
-    rows = cursor.fetchall()
-    return [
-        Sumula(
-            tribunal=r["tribunal"],
-            numero=r["numero"],
-            enunciado=r["enunciado"],
-            referencia_legislativa=r["ramo"],
-            situacao=r["situacao"],
-            data_aprovacao=r["data_aprovacao"],
-            vinculante=bool(r["vinculante"]),
-        )
-        for r in rows
-    ]
+        rows = cursor.fetchall()
+        return [
+            Sumula(
+                tribunal=r["tribunal"],
+                numero=r["numero"],
+                enunciado=r["enunciado"],
+                referencia_legislativa=r["ramo"],
+                situacao=r["situacao"],
+                data_aprovacao=r["data_aprovacao"],
+                vinculante=bool(r["vinculante"]),
+            )
+            for r in rows
+        ]
 
 
 def buscar_repercussao_geral_local(
@@ -384,41 +382,51 @@ def buscar_repercussao_geral_local(
     limit: int = 15,
 ) -> list[RepercussaoGeral]:
     """Busca temas de repercussão geral no banco SQLite local."""
-    conn = get_connection()
-    cursor = conn.cursor()
+    with contextlib.closing(get_connection()) as conn:
+        cursor = conn.cursor()
 
-    if tema is not None:
-        cursor.execute(
-            f"""
-            SELECT {_COLUNAS_RG}
-            FROM repercussao_geral
-            WHERE numero_tema = ?
-            LIMIT ?
-            """,
-            (tema, limit),
-        )
-    elif query:
-        fts_query = _clean_fts_query(query)
-        if fts_query:
-            sql = f"""
-                SELECT {', '.join('r.' + c.strip() for c in _COLUNAS_RG.split(','))}
-                FROM repercussao_geral r
-                JOIN repercussao_fts ON r.id = repercussao_fts.rowid
-                WHERE repercussao_fts MATCH ?
-                ORDER BY bm25(repercussao_fts)
+        if tema is not None:
+            cursor.execute(
+                f"""
+                SELECT {_COLUNAS_RG}
+                FROM repercussao_geral
+                WHERE numero_tema = ?
                 LIMIT ?
-            """
-            try:
-                cursor.execute(sql, (fts_query, limit))
-            except sqlite3.OperationalError:
+                """,
+                (tema, limit),
+            )
+        elif query:
+            fts_query = _clean_fts_query(query)
+            if fts_query:
+                sql = f"""
+                    SELECT {", ".join("r." + c.strip() for c in _COLUNAS_RG.split(","))}
+                    FROM repercussao_geral r
+                    JOIN repercussao_fts ON r.id = repercussao_fts.rowid
+                    WHERE repercussao_fts MATCH ?
+                    ORDER BY bm25(repercussao_fts)
+                    LIMIT ?
+                """
+                try:
+                    cursor.execute(sql, (fts_query, limit))
+                except sqlite3.OperationalError:
+                    cursor.execute(
+                        f"""
+                        SELECT {_COLUNAS_RG}
+                        FROM repercussao_geral
+                        WHERE titulo LIKE ? OR tese LIKE ? OR descricao LIKE ?
+                        LIMIT ?
+                        """,
+                        (f"%{query}%", f"%{query}%", f"%{query}%", limit),
+                    )
+            else:
                 cursor.execute(
                     f"""
                     SELECT {_COLUNAS_RG}
                     FROM repercussao_geral
-                    WHERE titulo LIKE ? OR tese LIKE ? OR descricao LIKE ?
+                    ORDER BY numero_tema DESC
                     LIMIT ?
                     """,
-                    (f"%{query}%", f"%{query}%", f"%{query}%", limit),
+                    (limit,),
                 )
         else:
             cursor.execute(
@@ -430,28 +438,18 @@ def buscar_repercussao_geral_local(
                 """,
                 (limit,),
             )
-    else:
-        cursor.execute(
-            f"""
-            SELECT {_COLUNAS_RG}
-            FROM repercussao_geral
-            ORDER BY numero_tema DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
 
-    rows = cursor.fetchall()
-    return [
-        RepercussaoGeral(
-            numero_tema=r["numero_tema"],
-            titulo=r["titulo"],
-            descricao=r["descricao"],
-            relator=r["relator"],
-            leading_case=r["leading_case"],
-            situacao=r["situacao"],
-            data_reconhecimento=r["data_reconhecimento"],
-            tese=r["tese"],
-        )
-        for r in rows
-    ]
+        rows = cursor.fetchall()
+        return [
+            RepercussaoGeral(
+                numero_tema=r["numero_tema"],
+                titulo=r["titulo"],
+                descricao=r["descricao"],
+                relator=r["relator"],
+                leading_case=r["leading_case"],
+                situacao=r["situacao"],
+                data_reconhecimento=r["data_reconhecimento"],
+                tese=r["tese"],
+            )
+            for r in rows
+        ]
