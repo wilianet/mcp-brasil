@@ -2,6 +2,16 @@
 
 Todas as mudanças notáveis do mcp-brasil estão documentadas neste arquivo.
 
+## [0.15.0] - 2026-10-12
+
+### Features
+
+- **tjsp:** Buscar acórdãos de 2º grau do TJSP no e-SAJ CJSG (ementa, metadados, filtros de data, só-ementa e ordenação) (#2)
+
+### Bug Fixes
+
+- **jurisprudencia:** Fechar conexão SQLite, corrigir heurística de número e testar fallback local
+
 ## [0.14.0] - 2026-04-24
 
 ### Bug Fixes
