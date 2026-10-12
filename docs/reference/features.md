@@ -274,6 +274,14 @@ Decisoes dos tribunais superiores, sumulas, repercussao geral, informativos.
 
 ---
 
+### `tjsp` — TJSP / e-SAJ CJSG (1 tool)
+
+Acordaos de 2o grau do Tribunal de Justica de Sao Paulo: ementa e metadados, com filtros de data de julgamento, busca so na ementa e ordenacao. Sem WAF e sem login para ementa; inteiro teor exige login no e-SAJ.
+
+| Tool | Descricao |
+|------|-----------|
+| `tjsp_buscar_acordaos_tjsp` | Acordaos do TJSP por termo, pagina, datas de julgamento e ordenacao |
+
 ## Eleitoral
 
 ### `tse` — Tribunal Superior Eleitoral (15 tools)
