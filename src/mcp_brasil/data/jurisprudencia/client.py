@@ -217,15 +217,17 @@ async def buscar_sumulas_stf(query: str | None = None) -> list[Sumula]:
         params["queryString"] = query
     try:
         data = await _get(STF_API_BASE, params=params)
+        if isinstance(data, dict):
+            resultados = data.get("result", [])
+            if isinstance(resultados, list) and resultados:
+                return [_parse_sumula(r, "STF") for r in resultados if isinstance(r, dict)]
     except Exception:
-        logger.warning("STF Súmulas API retornou erro")
-        return []
+        logger.warning("STF Súmulas API retornou erro ou WAF — fallback para banco local")
 
-    if isinstance(data, dict):
-        resultados = data.get("result", [])
-        if isinstance(resultados, list):
-            return [_parse_sumula(r, "STF") for r in resultados if isinstance(r, dict)]
-    return []
+    # Fallback offline-first para base SQLite FTS5
+    from .db import buscar_sumulas_local
+
+    return buscar_sumulas_local(query=query, tribunal="stf")
 
 
 # === Repercussão Geral ===
@@ -267,12 +269,15 @@ async def buscar_repercussao_geral(
         params["tema"] = tema
     try:
         data = await _get(STF_API_BASE, params=params)
+        if isinstance(data, dict):
+            resultados = data.get("result", [])
+            if isinstance(resultados, list) and resultados:
+                return [_parse_repercussao(r) for r in resultados if isinstance(r, dict)]
     except Exception:
-        logger.warning("STF Repercussão Geral API retornou erro")
-        return []
+        logger.warning(
+            "STF Repercussão Geral API retornou erro ou WAF — fallback para banco local"
+        )
 
-    if isinstance(data, dict):
-        resultados = data.get("result", [])
-        if isinstance(resultados, list):
-            return [_parse_repercussao(r) for r in resultados if isinstance(r, dict)]
-    return []
+    from .db import buscar_repercussao_geral_local
+
+    return buscar_repercussao_geral_local(query=query, tema=tema)

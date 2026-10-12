@@ -152,21 +152,28 @@ async def buscar_sumulas(
 ) -> str:
     """Busca súmulas dos tribunais superiores.
 
-    Pesquisa súmulas do STF (incluindo vinculantes).
+    Pesquisa súmulas do STF (incluindo vinculantes) e do STJ.
 
     Args:
-        tribunal: Tribunal (stf). Default: stf.
-        query: Filtro por texto da súmula (opcional).
+        tribunal: Tribunal (stf ou stj). Default: stf.
+        query: Filtro por texto ou número da súmula (opcional).
 
     Returns:
         Lista de súmulas com número e enunciado.
     """
-    if tribunal.lower() != "stf":
-        return "Busca de súmulas atualmente disponível apenas para o STF."
+    tribunal_lower = tribunal.lower().strip()
+    if tribunal_lower not in ("stf", "stj"):
+        return "Busca de súmulas atualmente disponível apenas para STF e STJ."
 
-    sumulas = await client.buscar_sumulas_stf(query)
+    if tribunal_lower == "stf":
+        sumulas = await client.buscar_sumulas_stf(query)
+    else:
+        from .db import buscar_sumulas_local
+
+        sumulas = buscar_sumulas_local(query=query, tribunal="stj")
+
     if not sumulas:
-        msg = "Nenhuma súmula encontrada"
+        msg = f"Nenhuma súmula encontrada no {tribunal.upper()}"
         if query:
             msg += f" para '{query}'"
         return msg + "."

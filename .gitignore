@@ -27,3 +27,7 @@ AGENTS.md
 .idea/
 .vscode/
 *.swp
+
+# SQLite Databases
+*.db
+*.db-journal
